@@ -1,4 +1,5 @@
 #include <iostream>
+#include <algorithm>
 #include <Python.h>
 #include "../../src/OnsetDetectionFunction.h"
 #include "../../src/BTrack.h"
@@ -283,6 +284,92 @@ static PyObject * btrack_trackBeatsFromOnsetDF(PyObject *dummy, PyObject *args)
     return (PyObject *)c;
 }
 
+typedef struct {
+    PyObject_HEAD
+    BTrack *btrack_ptr;
+    int numframes;
+} PyBTrack;
+
+static int PyBTrack_init(PyBTrack *self, PyObject *args, PyObject *kwds) {
+    int hopsize, framesize;
+    if (!PyArg_ParseTuple(args, "ii", &hopsize, &framesize)) {
+        return -1;
+    }
+
+    self->btrack_ptr = new BTrack(hopsize, framesize);
+    self->numframes = 0;
+
+    return 0;    
+}
+
+static void PyBTrack_dealloc(PyBTrack *self) {
+    delete self->btrack_ptr;
+    Py_TYPE(self)->tp_free(self);
+}
+
+static PyObject * PyBTrack_trackBeats(PyBTrack *self, PyObject *args) {
+    PyObject *arg1 = NULL;
+    PyObject *arr1 = NULL;
+    
+    if (!PyArg_ParseTuple(args, "O", &arg1)) {
+        return NULL;
+    }
+    
+    arr1 = PyArray_FROM_OTF(arg1, NPY_DOUBLE, NPY_IN_ARRAY);
+    if (arr1 == NULL) {
+        return NULL;
+    }
+
+    BTrack *b = self->btrack_ptr;
+    
+    ////////// GET INPUT DATA ///////////////////
+    
+    // get data as array
+    double* data = (double*) PyArray_DATA(arr1);
+    
+    // get array size
+    long data_length = std::min(PyArray_Size((PyObject*) arr1), b->getHopSize());
+    
+    
+    ////////// BEGIN PROCESS ///////////////////    
+    double buffer[b->getHopSize()]; // buffer to hold one hopsize worth of audio samples
+    
+    memcpy(buffer, data, sizeof(double) * data_length);
+    memset(buffer + data_length, 0, (b->getHopSize() - data_length));
+    
+    
+    // process the current audio frame
+    b->processAudioFrame(buffer);
+
+    bool got_beat = false;;
+    double beat_time;
+        
+    // if a beat is currently scheduled
+    if (b->beatDueInCurrentFrame()) {
+        beat_time = BTrack::getBeatTimeInSeconds(self->numframes, b->getHopSize(), 44100);
+        got_beat = true;
+    }
+    self->numframes++;
+    
+    ///////// End Processing Loop /////////////
+    ///////////////////////////////////////////
+    
+    
+    ////////// END PROCESS ///////////////////
+    
+    if (got_beat) {
+        return PyFloat_FromDouble(beat_time);
+    } else {
+        Py_INCREF(Py_None);
+        return Py_None;
+    }
+}
+
+static PyMethodDef PyBTrack_methods[] = {
+    {"testbeat", (PyCFunction) PyBTrack_trackBeats, METH_VARARGS, "test for a beat"},
+    {NULL, NULL, 0, NULL}
+};
+
 //=======================================================================
 static PyMethodDef btrack_methods[] = {
     { "calculateOnsetDF",btrack_calculateOnsetDF,METH_VARARGS,"Calculate the onset detection function"},
@@ -291,11 +378,33 @@ static PyMethodDef btrack_methods[] = {
     {NULL, NULL, 0, NULL} /* Sentinel */
 };
 
+static PyTypeObject PyBTrackType = {PyVarObject_HEAD_INIT(NULL, 0) "btrack.BTrack"};
+
+
 //=======================================================================
-PyMODINIT_FUNC initbtrack(void)
-{
-    (void)Py_InitModule("btrack", btrack_methods);
+PyMODINIT_FUNC initbtrack(void) {
+    PyBTrackType.tp_new         = PyType_GenericNew;
+    PyBTrackType.tp_basicsize   = sizeof(PyBTrack);
+    PyBTrackType.tp_dealloc     = (destructor) PyBTrack_dealloc;
+    PyBTrackType.tp_flags       = Py_TPFLAGS_DEFAULT;
+    PyBTrackType.tp_doc         = "BTrack object";
+    PyBTrackType.tp_methods     = PyBTrack_methods;
+    PyBTrackType.tp_init        = (initproc) PyBTrack_init;
+
+    if (PyType_Ready(&PyBTrackType) < 0) return;
+
+    //PyObject *m = PyModule_Create(&btrackmodule);
+    //if (m == NULL) return NULL;
+
+    Py_INCREF(&PyBTrackType);
+
+    PyObject *m = Py_InitModule("btrack", btrack_methods);
+    if (m == NULL) return;
+    PyModule_AddObject(m, "BTrack", (PyObject*) &PyBTrackType);
+
     import_array();
+
+    //return m;
 }
 
 //=======================================================================
